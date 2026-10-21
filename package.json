@@ -1,0 +1,22 @@
+{
+  "name": "petpal",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "PetPal MVP: offline-testable booking vertical slice",
+  "engines": {
+    "node": ">=22.18.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/test/*.test.js",
+    "dev": "node --env-file=.env --experimental-strip-types apps/api/src/main.ts",
+    "start": "node --env-file=.env dist/src/main.js",
+    "check": "npm run typecheck && npm test"
+  },
+  "devDependencies": {
+    "@types/node": "22.19.19",
+    "typescript": "5.9.3"
+  }
+}

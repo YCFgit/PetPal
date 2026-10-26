@@ -1,0 +1,7 @@
+CREATE DATABASE IF NOT EXISTS petpal_dev
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+CREATE DATABASE IF NOT EXISTS petpal_test
+  CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin;
+
+GRANT ALL PRIVILEGES ON petpal_dev.* TO 'ycf'@'%';
+GRANT ALL PRIVILEGES ON petpal_test.* TO 'ycf'@'%';

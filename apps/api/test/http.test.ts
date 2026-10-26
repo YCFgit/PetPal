@@ -2,10 +2,11 @@ import assert from 'node:assert/strict';
 import { describe, it } from 'node:test';
 import { createApplication, MAX_BODY_BYTES } from '../src/http/application.ts';
 import { BookingService } from '../src/domain/booking-service.ts';
+import { ProfileService } from '../src/domain/profile-service.ts';
 import { MemoryBookingStore } from '../src/storage/memory-store.ts';
 import { demoState } from '../src/development/demo-data.ts';
 import { loadConfig } from '../src/config.ts';
-import type { Order, Quote, Service } from '../src/domain/models.ts';
+import type { Address, Order, Pet, Quote, Service } from '../src/domain/models.ts';
 
 async function responseBody<Data>(response: Response): Promise<{ data: Data; requestId: string }> {
   return await response.json() as { data: Data; requestId: string };
@@ -20,8 +21,11 @@ const token = 'development-test-token-not-for-production';
 function fixture() {
   const now = new Date('2026-10-21T07:00:00.000Z');
   const state = demoState('user-one', now);
-  const service = new BookingService(new MemoryBookingStore(state), { clock: () => now });
-  const application = createApplication(service, { token, userId: 'user-one' });
+  state.pets.set('other-cat', { id: 'other-cat', userId: 'user-two', name: 'Other', type: 'CAT', careNotes: '' });
+  state.addresses.set('other-address', { id: 'other-address', userId: 'user-two', areaId: 'demo-area', label: 'Other' });
+  const store = new MemoryBookingStore(state);
+  const service = new BookingService(store, { clock: () => now });
+  const application = createApplication(service, new ProfileService(store), { token, userId: 'user-one' });
   return async (path: string, options: { method?: string; body?: string; authorized?: boolean;
     key?: string; contentType?: string; extraHeaders?: Record<string, string> } = {}) => application(new Request(`http://localhost${path}`, {
     method: options.method ?? 'GET',
@@ -108,6 +112,135 @@ describe('development HTTP contract', () => {
   });
 });
 
+describe('profile HTTP contract', () => {
+  it('creates and maintains profiles through authenticated endpoints', async () => {
+    const request = fixture();
+    const createdPet = await request('/api/v1/pets', {
+      method: 'POST', body: JSON.stringify({ name: '测试猫咪', type: 'CAT' }),
+    });
+    assert.equal(createdPet.status, 201);
+    const pet = (await responseBody<Pet>(createdPet)).data;
+    assert.equal(pet.userId, 'user-one');
+    const updatedPet = await request(`/api/v1/pets/${pet.id}`, {
+      method: 'PATCH', body: JSON.stringify({ careNotes: '请换水' }),
+    });
+    assert.equal(updatedPet.status, 200);
+    assert.equal((await responseBody<Pet>(updatedPet)).data.careNotes, '请换水');
+    assert.equal((await responseBody<Pet>(await request(`/api/v1/pets/${pet.id}`))).data.name, '测试猫咪');
+    assert.equal((await responseBody<Pet[]>(await request('/api/v1/pets'))).data.length, 2);
+    const createdAddress = await request('/api/v1/addresses', {
+      method: 'POST', body: JSON.stringify({ areaId: 'demo-area', label: '测试地址' }),
+    });
+    assert.equal(createdAddress.status, 201);
+    const address = (await responseBody<Address>(createdAddress)).data;
+    const updatedAddress = await request(`/api/v1/addresses/${address.id}`, {
+      method: 'PATCH', body: JSON.stringify({ label: '新测试地址' }),
+    });
+    assert.equal(updatedAddress.status, 200);
+    assert.equal((await responseBody<Address>(await request(`/api/v1/addresses/${address.id}`))).data.label, '新测试地址');
+    assert.equal((await responseBody<Address[]>(await request('/api/v1/addresses'))).data.length, 2);
+    for (const path of [`/api/v1/pets/${pet.id}`, `/api/v1/addresses/${address.id}`]) {
+      const deleted = await request(path, { method: 'DELETE' });
+      assert.equal(deleted.status, 200);
+      assert.equal((await responseBody<{ deleted: boolean }>(deleted)).data.deleted, true);
+      assert.equal((await request(path)).status, 404);
+    }
+  });
+
+  it('requires authentication for every profile operation and rejects forged ownership', async () => {
+    const request = fixture();
+    for (const collection of ['pets', 'addresses']) {
+      for (const method of ['GET', 'POST']) {
+        assert.equal((await request(`/api/v1/${collection}`, { method, authorized: false })).status, 401);
+      }
+      for (const method of ['GET', 'PATCH', 'DELETE']) {
+        assert.equal((await request(`/api/v1/${collection}/unknown`, { method, authorized: false })).status, 401);
+      }
+    }
+    const forged = await request('/api/v1/pets', {
+      method: 'POST', body: JSON.stringify({ name: '测试', type: 'CAT', userId: 'user-two' }),
+    });
+    assert.equal(forged.status, 400);
+    assert.equal((await responseError(forged)).code, 'INVALID_REQUEST');
+    const created = await request('/api/v1/pets', { method: 'POST', body: JSON.stringify({ name: '测试', type: 'CAT' }),
+      extraHeaders: { 'x-user-id': 'user-two' } });
+    assert.equal((await responseBody<Pet>(created)).data.userId, 'user-one');
+  });
+
+  it('returns 404 for foreign profile detail, edits and deletion without exposing ownership', async () => {
+    const request = fixture();
+    for (const [path, changes] of [
+      ['/api/v1/pets/other-cat', { name: 'stolen' }],
+      ['/api/v1/addresses/other-address', { label: 'stolen' }],
+    ] as const) {
+      for (const method of ['GET', 'PATCH', 'DELETE']) {
+        const response = await request(path, { method,
+          ...(method === 'PATCH' ? { body: JSON.stringify(changes) } : {}) });
+        assert.equal(response.status, 404);
+        assert.equal((await responseError(response)).code, 'NOT_FOUND');
+      }
+    }
+  });
+
+  it('enforces body validation and configured areas for profile writes', async () => {
+    const request = fixture();
+    const malformed = await request('/api/v1/pets', { method: 'POST', body: '{' });
+    assert.equal(malformed.status, 400);
+    assert.equal((await responseError(malformed)).code, 'INVALID_JSON');
+    const unknownArea = await request('/api/v1/addresses', {
+      method: 'POST', body: JSON.stringify({ areaId: 'unknown-area', label: '测试' }),
+    });
+    assert.equal(unknownArea.status, 409);
+    assert.equal((await responseError(unknownArea)).code, 'AREA_UNAVAILABLE');
+    assert.equal((await request('/api/v1/addresses/demo-address', { method: 'PATCH', body: '{}' })).status, 400);
+    assert.equal((await request('/api/v1/pets/demo-cat', {
+      method: 'PATCH', body: '{}', contentType: 'text/plain',
+    })).status, 415);
+    assert.equal((await request('/api/v1/pets', {
+      method: 'POST', body: ' '.repeat(MAX_BODY_BYTES + 1),
+    })).status, 413);
+  });
+
+  it('connects profile creation to quotes and orders, rejects stale quotes and protects active references', async () => {
+    const request = fixture();
+    const pet = (await responseBody<Pet>(await request('/api/v1/pets', {
+      method: 'POST', body: JSON.stringify({ name: '新猫咪', type: 'CAT' }),
+    }))).data;
+    const address = (await responseBody<Address>(await request('/api/v1/addresses', {
+      method: 'POST', body: JSON.stringify({ areaId: 'demo-area', label: '测试地址' }),
+    }))).data;
+    const input = { serviceId: 'demo-cat-care', slotId: 'demo-slot', addressId: address.id, petIds: [pet.id] };
+    const first = (await responseBody<Quote>(await request('/api/v1/orders/quotes', {
+      method: 'POST', body: JSON.stringify(input),
+    }))).data;
+    await request(`/api/v1/pets/${pet.id}`, { method: 'PATCH', body: JSON.stringify({ careNotes: '新的照护说明' }) });
+    const stale = await request('/api/v1/orders', {
+      method: 'POST', body: JSON.stringify({ quoteId: first.id }), key: 'http-stale-profile',
+    });
+    assert.equal(stale.status, 409);
+    assert.equal((await responseError(stale)).code, 'QUOTE_STALE');
+    const fresh = (await responseBody<Quote>(await request('/api/v1/orders/quotes', {
+      method: 'POST', body: JSON.stringify(input),
+    }))).data;
+    const created = await request('/api/v1/orders', {
+      method: 'POST', body: JSON.stringify({ quoteId: fresh.id }), key: 'http-fresh-profile',
+    });
+    assert.equal(created.status, 201);
+    const order = (await responseBody<Order>(created)).data;
+    for (const path of [`/api/v1/pets/${pet.id}`, `/api/v1/addresses/${address.id}`]) {
+      const deletion = await request(path, { method: 'DELETE' });
+      assert.equal(deletion.status, 409);
+      assert.equal((await responseError(deletion)).code, 'RESOURCE_IN_USE');
+    }
+    await request(`/api/v1/orders/${order.id}/cancel-requests`, { method: 'POST', body: '{}', key: 'http-profile-cancel' });
+    assert.equal((await request(`/api/v1/pets/${pet.id}`, { method: 'DELETE' })).status, 200);
+    assert.equal((await request(`/api/v1/addresses/${address.id}`, { method: 'DELETE' })).status, 200);
+    const retained = (await responseBody<Order>(await request(`/api/v1/orders/${order.id}`))).data;
+    assert.equal(retained.snapshot.petSnapshots[0]?.careNotes, '新的照护说明');
+    assert.equal(retained.snapshot.addressSnapshot.label, '测试地址');
+  });
+});
+
 describe('startup guards', () => {
   const environment = {
     NODE_ENV: 'development', PETPAL_STORAGE: 'memory', PETPAL_AUTH: 'development', PETPAL_DEV_TOKEN: token,
@@ -119,7 +252,11 @@ describe('startup guards', () => {
     assert.throws(() => loadConfig({ ...environment, NODE_ENV: 'production' }), /cannot start/);
     assert.throws(() => loadConfig({ ...environment, PETPAL_DEV_TOKEN: '' }), /PETPAL_DEV_TOKEN/);
     assert.throws(() => loadConfig({ ...environment, PETPAL_AUTH: 'wechat' }), /explicitly enabled/);
-    assert.throws(() => loadConfig({ ...environment, PETPAL_STORAGE: 'mysql' }), /explicitly enabled/);
+    assert.throws(() => loadConfig({ ...environment, PETPAL_STORAGE: 'mysql' }), /MYSQL_USER/);
+    const mysql = loadConfig({ ...environment, PETPAL_STORAGE: 'mysql', MYSQL_USER: 'developer',
+      MYSQL_PASSWORD: 'local-secret', MYSQL_DATABASE: 'petpal_dev' });
+    assert.equal(mysql.storage, 'mysql');
+    assert.equal(mysql.mysql?.database, 'petpal_dev');
   });
 
   it('refuses public binding and invalid configuration values', () => {
@@ -127,5 +264,8 @@ describe('startup guards', () => {
     assert.throws(() => loadConfig({ ...environment, PORT: 'NaN' }), /PORT/);
     assert.throws(() => loadConfig({ ...environment, PORT: '0' }), /PORT/);
     assert.throws(() => loadConfig({ ...environment, PETPAL_ENABLE_DEMO_DATA: 'yes' }), /true or false/);
+    assert.throws(() => loadConfig({ ...environment, PETPAL_STORAGE: 'redis' }), /explicitly enabled/);
+    assert.throws(() => loadConfig({ ...environment, PETPAL_STORAGE: 'mysql', MYSQL_USER: 'developer',
+      MYSQL_PASSWORD: 'local-secret', MYSQL_HOST: 'database.example.com' }), /loopback MYSQL_HOST/);
   });
 });

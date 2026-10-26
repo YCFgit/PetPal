@@ -1,17 +1,22 @@
+import type { MysqlConfig } from './storage/mysql-store.ts';
+import { loadMysqlConfig } from './storage/mysql-store.ts';
+
 export interface DevelopmentConfig {
   host: string;
   port: number;
   userId: string;
   token: string;
   demoData: boolean;
+  storage: 'memory' | 'mysql';
+  mysql: MysqlConfig | null;
 }
 
 export function loadConfig(environment: NodeJS.ProcessEnv): DevelopmentConfig {
   if (!['development', 'test'].includes(environment.NODE_ENV ?? '')) {
     throw new Error('This development slice cannot start outside development/test environments');
   }
-  if (environment.PETPAL_STORAGE !== 'memory' || environment.PETPAL_AUTH !== 'development') {
-    throw new Error('Only explicitly enabled development authentication and memory storage are implemented');
+  if (!['memory', 'mysql'].includes(environment.PETPAL_STORAGE ?? '') || environment.PETPAL_AUTH !== 'development') {
+    throw new Error('Only explicitly enabled development authentication and memory or MySQL storage are implemented');
   }
   const host = environment.HOST ?? '127.0.0.1';
   if (!['127.0.0.1', '::1'].includes(host)) throw new Error('Development server must listen on a loopback address');
@@ -26,5 +31,9 @@ export function loadConfig(environment: NodeJS.ProcessEnv): DevelopmentConfig {
   if (!['true', 'false'].includes(environment.PETPAL_ENABLE_DEMO_DATA ?? 'false')) {
     throw new Error('PETPAL_ENABLE_DEMO_DATA must be true or false');
   }
-  return { host, port, userId, token, demoData: environment.PETPAL_ENABLE_DEMO_DATA === 'true' };
+  const storage = environment.PETPAL_STORAGE as 'memory' | 'mysql';
+  return {
+    host, port, userId, token, demoData: environment.PETPAL_ENABLE_DEMO_DATA === 'true', storage,
+    mysql: storage === 'mysql' ? loadMysqlConfig(environment) : null,
+  };
 }

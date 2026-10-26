@@ -1,6 +1,7 @@
 import { randomUUID, timingSafeEqual } from 'node:crypto';
 import { DomainError, objectInput, onlyFields } from '../domain/errors.ts';
 import type { BookingService } from '../domain/booking-service.ts';
+import type { ProfileService } from '../domain/profile-service.ts';
 
 export const MAX_BODY_BYTES = 16_384;
 
@@ -51,14 +52,15 @@ function authenticate(request: Request, token: string, userId: string): string {
   return userId;
 }
 
-export function createApplication(service: BookingService, options: { token: string; userId: string }) {
+export function createApplication(service: BookingService, profiles: ProfileService,
+  options: { token: string; userId: string; storage?: 'volatile-memory' | 'mysql' }) {
   return async (request: Request): Promise<Response> => {
     const requestId = randomUUID();
     try {
       const url = new URL(request.url);
       const path = url.pathname;
       if (request.method === 'GET' && path === '/health') {
-        return jsonResponse({ status: 'ok', environment: 'development-only', storage: 'volatile-memory',
+        return jsonResponse({ status: 'ok', environment: 'development-only', storage: options.storage ?? 'volatile-memory',
           authentication: 'development-token', paymentsEnabled: false }, requestId);
       }
       if (request.method === 'GET' && path === '/api/v1/services') {
@@ -70,10 +72,34 @@ export function createApplication(service: BookingService, options: { token: str
       }
       const userId = authenticate(request, options.token, options.userId);
       if (request.method === 'GET' && path === '/api/v1/pets') {
-        return jsonResponse(await service.listPets(userId), requestId);
+        return jsonResponse(await profiles.listPets(userId), requestId);
+      }
+      if (request.method === 'POST' && path === '/api/v1/pets') {
+        return jsonResponse(await profiles.createPet(userId, await body(request)), requestId, 201);
+      }
+      const petMatch = /^\/api\/v1\/pets\/([a-zA-Z0-9_-]+)$/.exec(path);
+      if (petMatch?.[1]) {
+        if (request.method === 'GET') return jsonResponse(await profiles.getPet(userId, petMatch[1]), requestId);
+        if (request.method === 'PATCH') {
+          return jsonResponse(await profiles.updatePet(userId, petMatch[1], await body(request)), requestId);
+        }
+        if (request.method === 'DELETE') return jsonResponse(await profiles.deletePet(userId, petMatch[1]), requestId);
       }
       if (request.method === 'GET' && path === '/api/v1/addresses') {
-        return jsonResponse(await service.listAddresses(userId), requestId);
+        return jsonResponse(await profiles.listAddresses(userId), requestId);
+      }
+      if (request.method === 'POST' && path === '/api/v1/addresses') {
+        return jsonResponse(await profiles.createAddress(userId, await body(request)), requestId, 201);
+      }
+      const addressMatch = /^\/api\/v1\/addresses\/([a-zA-Z0-9_-]+)$/.exec(path);
+      if (addressMatch?.[1]) {
+        if (request.method === 'GET') return jsonResponse(await profiles.getAddress(userId, addressMatch[1]), requestId);
+        if (request.method === 'PATCH') {
+          return jsonResponse(await profiles.updateAddress(userId, addressMatch[1], await body(request)), requestId);
+        }
+        if (request.method === 'DELETE') {
+          return jsonResponse(await profiles.deleteAddress(userId, addressMatch[1]), requestId);
+        }
       }
       if (request.method === 'POST' && path === '/api/v1/orders/quotes') {
         return jsonResponse(await service.createQuote(userId, await body(request)), requestId, 201);

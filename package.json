@@ -11,12 +11,19 @@
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/test/*.test.js",
+    "test:mysql": "npm run build && PETPAL_TEST_MYSQL=true node --env-file-if-exists=.env --test dist/test/mysql.test.js",
     "dev": "node --env-file=.env --experimental-strip-types apps/api/src/main.ts",
     "start": "node --env-file=.env dist/src/main.js",
+    "db:migrate": "node --env-file=.env --experimental-strip-types apps/api/src/scripts/migrate.ts",
+    "db:backup": "node --env-file=.env --experimental-strip-types apps/api/src/scripts/db-backup.ts",
+    "db:restore": "node --env-file=.env --experimental-strip-types apps/api/src/scripts/db-restore.ts",
     "check": "npm run typecheck && npm test"
   },
   "devDependencies": {
     "@types/node": "22.19.19",
     "typescript": "5.9.3"
+  },
+  "dependencies": {
+    "mysql2": "3.24.6"
   }
 }
